@@ -1,0 +1,96 @@
+pipeline {
+    agent any
+
+    environment {
+        // AWS and EKS config
+        AWS_REGION = 'us-east-1'
+        EKS_CLUSTER_NAME = 'rt-eksclu01a'
+
+        // DockerHub image
+        DOCKER_IMAGE = 'yourdockerhubuser/your-app:latest'
+
+        // Jenkins credentials IDs
+        AWS_CREDENTIALS_ID = 'aws-credentials-id'
+        DOCKERHUB_CREDENTIALS_ID = 'docker-credentials'
+    }
+
+    options {
+        timestamps()
+    }
+
+    stages {
+        stage('Checkout Code') {
+            steps {
+                git url: 'https://github.com/rtan1s/aws-aes-devops-cpst-t2.git', branch: 'master'
+            }
+        }
+
+        stage('Login to DockerHub') { // This stage can remain separate
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: "${env.DOCKERHUB_CREDENTIALS_ID}",
+                    usernameVariable: 'DOCKER_USERNAME',
+                    passwordVariable: 'DOCKER_PASSWORD'
+                )]) {
+                    sh '''
+                        echo "Logging into DockerHub..."
+                        echo $DOCKER_PASSWORD | docker login -u $DOCKER_USERNAME --password-stdin
+                    '''
+                }
+            }
+        }
+
+        // --- NEW STRUCTURE START ---
+        // Wrap the AWS/EKS related stages in a single withCredentials block
+        stage('AWS Operations') {
+            steps {
+                withCredentials([[
+                    $class: 'AmazonWebServicesCredentialsBinding',
+                    credentialsId: "${env.AWS_CREDENTIALS_ID}"
+                ]]) {
+                    script { // Using script block to run multiple stages/steps inside withCredentials
+                        stage('Configure AWS & kubectl') {
+                            sh '''
+                                echo "Configuring AWS CLI and EKS..."
+                                aws sts get-caller-identity
+                                aws eks --region $AWS_REGION update-kubeconfig --name $EKS_CLUSTER_NAME
+                                kubectl get nodes
+                            '''
+                        }
+
+                        stage('Deploy to EKS') {
+                            sh '''
+                            kubectl apply -f eks/
+                                #echo "Deploying Kubernetes resources from eks/ folder to EKS..."
+                                # Apply deployment.yaml with envsubst if it needs it
+                                # Otherwise, kubectl apply -f eks/ is sufficient if no templating needed
+                                #envsubst < eks/deployment.yaml | kubectl apply -f -
+                                #kubectl apply -f eks/service.yaml # Or: kubectl apply -f eks/ for all others
+                                # If you decided to use 'kubectl apply -f eks/' for all files, remove the specific lines above
+                                # and just use: kubectl apply -f eks/
+                            '''
+                        }
+
+                        stage('Verify Deployment') {
+                            sh '''
+                                echo "Verifying deployment..."
+                                kubectl get pods -o wide
+                                kubectl get svc -o wide
+                            '''
+                        }
+                    } // end script
+                } // end withCredentials
+            } // end steps
+        } // end stage 'AWS Operations'
+        // --- NEW STRUCTURE END ---
+    }
+
+    post {
+        failure {
+            echo "❌ Deployment failed."
+        }
+        success {
+            echo "✅ Deployment succeeded."
+        }
+    }
+}
